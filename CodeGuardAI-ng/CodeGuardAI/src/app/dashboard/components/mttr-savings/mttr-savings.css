@@ -1,0 +1,28 @@
+:host {
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+
+.mttr-container {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  width: 100%;
+  height: 100px; /* Keep it compact like the original sparkline */
+  padding: 0 10px;
+}
+
+.currency-symbol {
+  font-size: 28px;
+  font-weight: 800;
+  color: #16a34a; /* Darker green for the text */
+  margin-right: 20px;
+}
+
+.chart-wrapper {
+  position: relative;
+  flex-grow: 1; /* Takes up the remaining space */
+  height: 100%;
+  width: 100%;
+}

@@ -1,0 +1,15 @@
+<div class="mttr-container" *ngIf="data && data.length > 0">
+  
+  <div class="currency-symbol">
+    <span>$$</span>
+  </div>
+
+  <div class="chart-wrapper">
+    <canvas baseChart 
+      [data]="chartData" 
+      [options]="chartOptions" 
+      type="bar">
+    </canvas>
+  </div>
+  
+</div>

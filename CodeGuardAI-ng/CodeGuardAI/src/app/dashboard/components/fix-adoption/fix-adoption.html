@@ -1,0 +1,11 @@
+<div class="gauge-container" *ngIf="rate !== undefined">
+  <canvas baseChart 
+    [data]="chartData" 
+    [options]="chartOptions" 
+    type="doughnut">
+  </canvas>
+  
+  <div class="gauge-text">
+    <span>{{ rate }}%</span>
+  </div>
+</div>

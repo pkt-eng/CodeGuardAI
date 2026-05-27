@@ -1,0 +1,59 @@
+<div class="dashboard-container" *ngIf="dashboardData; else loading">
+  <header class="dashboard-header">
+    <div class="header-titles">
+      <h2 class="sub-title">6. DASHBOARD & ANALYTICS (ANGULAR UI)</h2>
+      <h1 class="main-title">
+        <span class="logo-placeholder">🛡️</span> 
+        CodeGuard AI Dashboard
+      </h1>
+    </div>
+  </header>
+
+  <div class="widgets-grid">
+    
+    <div class="widget card">
+      <h3>Risk Overview</h3>
+      <div class="widget-content">
+        <app-risk-overview [data]="dashboardData.riskOverview"></app-risk-overview>
+      </div>
+    </div>
+
+    <div class="widget card">
+      <h3>Vulnerability Trends</h3>
+      <div class="widget-content" style="border: none; background: transparent; display: block; width: 100%;">
+         <app-vulnerability-trends [data]="dashboardData.vulnerabilityTrends"></app-vulnerability-trends>
+      </div>
+    </div>
+
+    <div class="widget card">
+      <h3>Top Vulnerabilities</h3>
+      <div class="widget-content" style="border: none; background: transparent; display: block; width: 100%;">
+         <app-top-vulnerabilities [data]="dashboardData.topVulnerabilities"></app-top-vulnerabilities>
+      </div>
+    </div>
+
+    <div class="widget card">
+      <h3>Fix Adoption Rate</h3>
+      <div class="widget-content adoption-content">
+        <app-fix-adoption [rate]="dashboardData.fixAdoptionRate"></app-fix-adoption>
+      </div>
+    </div>
+
+    <div class="widget card">
+      <h3>MTTR & Savings</h3>
+      <div class="widget-content" style="border: none; background: transparent; padding: 0;">
+         <app-mttr-savings [data]="dashboardData.mttrAndSavings"></app-mttr-savings>
+      </div>
+    </div>
+
+    <button class="export-btn card" (click)="exportReports()" style="cursor: pointer;">
+      Export Reports
+    </button>
+  </div>
+</div>
+
+<ng-template #loading>
+  <div class="loading-state" style="text-align: center; padding: 50px;">
+    Loading CodeGuard AI Dashboard...
+  </div>
+</ng-template>

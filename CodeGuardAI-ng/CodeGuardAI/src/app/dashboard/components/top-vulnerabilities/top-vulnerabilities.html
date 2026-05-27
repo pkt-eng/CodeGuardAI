@@ -1,0 +1,7 @@
+<div class="bar-chart-container" *ngIf="data && data.length > 0">
+  <canvas baseChart 
+    [data]="chartData" 
+    [options]="chartOptions" 
+    type="bar">
+  </canvas>
+</div>
