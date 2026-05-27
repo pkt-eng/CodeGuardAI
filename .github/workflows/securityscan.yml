@@ -1,0 +1,61 @@
+name: CodeGuardAI Build & Protect
+ 
+on:
+  push:
+    branches: [ "**" ]
+  pull_request:
+    branches: [ "**" ]
+ 
+jobs:
+  build:
+    name: Build & Verify
+    runs-on: ubuntu-latest
+ 
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+ 
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 18
+ 
+      - name: Setup .NET SDK
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0'
+ 
+      - name: Install and Build Frontend
+        id: build_frontend
+        run: |
+          cd EarnEasyWorkmates.Client/EarnEasyWorkmates
+          npm install
+          npm run build 2>&1 | tee build_log_frontend.txt
+ 
+      - name: Build Backend
+        id: build_backend
+        run: |
+          cd EarnEasyWorkmates.Api/EarnEasyWorkmates
+          dotnet restore
+          dotnet build 2>&1 | tee build_log_backend.txt
+ 
+      - name: Notify CodeGuardAI on Failure
+        if: failure()
+        run: |
+          # Retrieve up to last 50 lines of logs from frontend and backend
+          LOG_CONTENT=""
+          if [ -f "EarnEasyWorkmates.Client/EarnEasyWorkmates/build_log_frontend.txt" ]; then
+            LOG_CONTENT="--- FRONTEND BUILD LOGS ---\n$(tail -n 50 EarnEasyWorkmates.Client/EarnEasyWorkmates/build_log_frontend.txt)\n"
+          fi
+          if [ -f "EarnEasyWorkmates.Api/EarnEasyWorkmates/build_log_backend.txt" ]; then
+            LOG_CONTENT="$LOG_CONTENT\n--- BACKEND BUILD LOGS ---\n$(tail -n 50 EarnEasyWorkmates.Api/EarnEasyWorkmates/build_log_backend.txt)"
+          fi
+          if [ -z "$LOG_CONTENT" ]; then
+            LOG_CONTENT="No build logs captured."
+          fi
+          # Clean and encode logs cleanly for JSON transmission
+          CLEAN_LOG=$(echo -e "$LOG_CONTENT" | jq -aRs .)
+          # POST to CodeGuardAI Webhook
+          curl -X POST "${{ secrets.CODEGUARD_API_URL }}/api/github/action-failure" \
+            -H "Content-Type: application/json" \
+            -d "{\"repo\": \"${{ github.repository }}\", \"branch\": \"${{ github.ref_name }}\", \"commitSha\": \"${{ github.sha }}\", \"runId\": \"${{ github.run_id }}\", \"errorMessage\": $CLEAN_LOG}"
