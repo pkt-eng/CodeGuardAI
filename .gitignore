@@ -1,0 +1,29 @@
+# .NET
+bin/
+obj/
+*.user
+*.suo
+*.vs/
+*.csproj.user
+appsettings.Development.json
+Clones/
+
+# Node / Angular
+node_modules/
+dist/
+.angular/
+.env
+
+# IDE
+.idea/
+.vscode/
+*.swp
+
+# OS
+Thumbs.db
+.DS_Store
+
+# Temp clones
+EarnEasyWorkmates_temp/
+
+# Migrations designer files are kept

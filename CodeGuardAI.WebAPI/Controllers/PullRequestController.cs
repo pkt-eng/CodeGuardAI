@@ -1,0 +1,96 @@
+using System;
+using System.Linq;
+using System.Threading.Tasks;
+using Microsoft.AspNetCore.Mvc;
+using Microsoft.EntityFrameworkCore;
+using CodeGuardAI.WebAPI.Data;
+using CodeGuardAI.WebAPI.Models;
+using CodeGuardAI.WebAPI.Services;
+
+namespace CodeGuardAI.WebAPI.Controllers;
+
+[ApiController]
+[Route("api/[controller]")]
+public class PullRequestController : ControllerBase
+{
+    private readonly AppDbContext _context;
+    private readonly IGitHubFixerService _gitHubFixerService;
+
+    public PullRequestController(AppDbContext context, IGitHubFixerService gitHubFixerService)
+    {
+        _context = context;
+        _gitHubFixerService = gitHubFixerService;
+    }
+
+    [HttpGet]
+    public async Task<IActionResult> GetPullRequests()
+    {
+        var prs = await _context.PullRequests.OrderByDescending(p => p.CreatedAt).ToListAsync();
+        return Ok(prs);
+    }
+
+    [HttpGet("{id}")]
+    public async Task<IActionResult> GetPullRequestDetails(int id)
+    {
+        var pr = await _context.PullRequests.FindAsync(id);
+        if (pr == null)
+        {
+            return NotFound(new { Message = "Pull Request not found." });
+        }
+
+        // Fetch associated vulnerability to show before/after diffs
+        var vulnerability = await _context.Vulnerabilities.SingleOrDefaultAsync(v => v.PullRequestId == id);
+
+        return Ok(new
+        {
+            PullRequest = pr,
+            Vulnerability = vulnerability
+        });
+    }
+
+    [HttpPost("{id}/merge")]
+    public async Task<IActionResult> MergePullRequest(int id)
+    {
+        var pr = await _context.PullRequests.FindAsync(id);
+        if (pr == null)
+        {
+            return NotFound(new { Message = "Pull Request not found." });
+        }
+        if (pr.Status == "Merged")
+        {
+            return BadRequest(new { Message = "Pull Request is already merged." });
+        }
+
+        try
+        {
+            // Perform the merge and push to the repository
+            await _gitHubFixerService.MergePullRequestAsync(id);
+
+            // Reward points for merged PR (simple demo logic)
+            var developer = await _context.Leaderboards.FirstOrDefaultAsync(l => l.Name == "John Doe");
+            if (developer != null)
+            {
+                developer.Score += 100;
+                var leaderboard = await _context.Leaderboards.OrderByDescending(l => l.Score).ToListAsync();
+                for (int i = 0; i < leaderboard.Count; i++)
+                {
+                    leaderboard[i].Rank = i + 1;
+                }
+            }
+
+            var vulnerability = await _context.Vulnerabilities.SingleOrDefaultAsync(v => v.PullRequestId == id);
+            await _context.SaveChangesAsync();
+
+            return Ok(new
+            {
+                Message = "Pull Request successfully merged! Vulnerability remediated and secure code applied.",
+                PullRequest = pr,
+                Vulnerability = vulnerability
+            });
+        }
+        catch (Exception ex)
+        {
+            return BadRequest(new { Message = "Merge failed.", Details = ex.Message });
+        }
+    }
+}

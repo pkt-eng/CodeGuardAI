@@ -1,0 +1,130 @@
+# Azure DevOps Pipeline for CodeGuard AI
+# Builds, restores, and runs conditional Snyk scans to report security threats to CodeGuard WebAPI
+
+trigger:
+- main
+- develop
+
+pool:
+  vmImage: 'ubuntu-latest'
+
+variables:
+  # The endpoint of your CodeGuard WebAPI
+  CodeGuardApiUrl: 'http://localhost:5142'
+  SolutionPath: 'CodeGuardAI.WebAPI/CodeGuardAI.WebAPI.sln'
+  BackendProjectPath: 'CodeGuardAI.WebAPI'
+  FrontendProjectPath: 'CodeGuardAI.Web'
+
+stages:
+- stage: SecurityScan
+  displayName: 'Snyk Security Scan stage'
+  jobs:
+  
+  # Backend .NET Scanning Job
+  - job: ScanBackend
+    displayName: 'Scan .NET WebAPI dependencies and code'
+    steps:
+    - task: UseDotNet@2
+      displayName: 'Install .NET SDK'
+      inputs:
+        packageType: 'sdk'
+        version: '9.x'
+
+    - task: DotNetCoreCLI@2
+      displayName: 'Restore NuGet dependencies'
+      inputs:
+        command: 'restore'
+        projects: '$(SolutionPath)'
+
+    - script: |
+        npm install -g snyk
+      displayName: 'Install Snyk CLI globally'
+
+    - script: |
+        snyk auth $(SNYK_TOKEN)
+      displayName: 'Authenticate Snyk CLI'
+      env:
+        SNYK_TOKEN: $(Snyk.ApiToken)
+
+    # Run snyk test on backend, continue pipeline even if exit code > 0 (vulnerabilities found)
+    - script: |
+        snyk test --all-projects --severity-threshold=high --json-file-output=snyk-backend-results.json
+      displayName: 'Run Snyk Backend Scan'
+      continueOnError: true
+
+    # Conditional step: Parses Snyk report and posts only if vulnerabilities count > 0
+    - powershell: |
+        $reportFile = "snyk-backend-results.json"
+        if (Test-Path $reportFile) {
+            $report = Get-Content -Raw -Path $reportFile | ConvertFrom-Json
+            if ($report.vulnerabilities -and $report.vulnerabilities.Count -gt 0) {
+                Write-Host "🚨 [CodeGuard AI] Snyk found $($report.vulnerabilities.Count) vulnerabilities in backend!"
+                
+                $headers = @{
+                  "Content-Type" = "application/json"
+                  "X-Git-Repo" = "$(Build.Repository.Name)"
+                  "X-Git-Branch" = "$(Build.SourceBranchName)"
+                  "X-Git-Commit" = "$(Build.SourceVersion)"
+                }
+                $body = Get-Content -Raw -Path $reportFile
+                Invoke-RestMethod -Uri "$(CodeGuardApiUrl)/api/vulnerability/upload" -Method Post -Headers $headers -Body $body
+                Write-Host "✅ [CodeGuard AI] Backend scan uploaded. Log in to dashboard to review secure fixes."
+            } else {
+                Write-Host "🛡️ [CodeGuard AI] Backend is secure. Skip uploading."
+            }
+        }
+      displayName: 'Conditional Upload to CodeGuard AI'
+
+  # Frontend Angular Scanning Job
+  - job: ScanFrontend
+    displayName: 'Scan Angular dependencies'
+    steps:
+    - task: NodeTool@0
+      displayName: 'Install Node.js'
+      inputs:
+        versionSpec: '20.x'
+
+    - script: |
+        cd $(FrontendProjectPath)
+        npm ci --legacy-peer-deps
+      displayName: 'Install Frontend dependencies'
+
+    - script: |
+        npm install -g snyk
+      displayName: 'Install Snyk CLI globally'
+
+    - script: |
+        snyk auth $(SNYK_TOKEN)
+      displayName: 'Authenticate Snyk CLI'
+      env:
+        SNYK_TOKEN: $(Snyk.ApiToken)
+
+    # Run snyk test on frontend, continue pipeline even if exit code > 0 (vulnerabilities found)
+    - script: |
+        cd $(FrontendProjectPath)
+        snyk test --severity-threshold=high --json-file-output=../snyk-frontend-results.json
+      displayName: 'Run Snyk Frontend Scan'
+      continueOnError: true
+
+    # Conditional step: Parses Snyk report and posts only if vulnerabilities count > 0
+    - powershell: |
+        $reportFile = "snyk-frontend-results.json"
+        if (Test-Path $reportFile) {
+            $report = Get-Content -Raw -Path $reportFile | ConvertFrom-Json
+            if ($report.vulnerabilities -and $report.vulnerabilities.Count -gt 0) {
+                Write-Host "🚨 [CodeGuard AI] Snyk found $($report.vulnerabilities.Count) vulnerabilities in frontend!"
+                
+                $headers = @{
+                  "Content-Type" = "application/json"
+                  "X-Git-Repo" = "$(Build.Repository.Name)"
+                  "X-Git-Branch" = "$(Build.SourceBranchName)"
+                  "X-Git-Commit" = "$(Build.SourceVersion)"
+                }
+                $body = Get-Content -Raw -Path $reportFile
+                Invoke-RestMethod -Uri "$(CodeGuardApiUrl)/api/vulnerability/upload" -Method Post -Headers $headers -Body $body
+                Write-Host "✅ [CodeGuard AI] Frontend scan uploaded. Log in to dashboard to review secure fixes."
+            } else {
+                Write-Host "🛡️ [CodeGuard AI] Frontend is secure. Skip uploading."
+            }
+        }
+      displayName: 'Conditional Upload to CodeGuard AI'

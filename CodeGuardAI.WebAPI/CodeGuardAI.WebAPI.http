@@ -1,0 +1,6 @@
+@CodeGuardAI.WebAPI_HostAddress = http://localhost:5142
+
+GET {{CodeGuardAI.WebAPI_HostAddress}}/weatherforecast/
+Accept: application/json
+
+###
