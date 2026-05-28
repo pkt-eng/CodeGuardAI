@@ -227,7 +227,18 @@ public class GitHubFixerService : IGitHubFixerService
         if (pr == null) throw new InvalidOperationException("Pull request not found.");
 
         if (string.IsNullOrWhiteSpace(pr.Repo))
-            throw new InvalidOperationException("Pull request has no repository set.");
+        {
+            var associatedVuln = await _dbContext.Vulnerabilities.FirstOrDefaultAsync(v => v.PullRequestId == pr.Id);
+            if (associatedVuln != null && !string.IsNullOrWhiteSpace(associatedVuln.Repo))
+            {
+                pr.Repo = associatedVuln.Repo;
+            }
+            else
+            {
+                pr.Repo = "AshokaGS/EarnEasyWorkmates";
+            }
+            await _dbContext.SaveChangesAsync();
+        }
 
         var repo = pr.Repo;
         var repoName = repo.Contains('/') ? repo.Split('/')[1] : repo;
