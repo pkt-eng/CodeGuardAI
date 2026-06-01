@@ -1,9 +1,10 @@
-using System;
-using System.Linq;
 using System.Threading.Tasks;
 using Microsoft.AspNetCore.Mvc;
-using Microsoft.EntityFrameworkCore;
+using Microsoft.AspNetCore.Authorization;
+using CodeGuardAI.WebAPI.Services;
 using CodeGuardAI.WebAPI.Data;
+using Microsoft.EntityFrameworkCore;
+using System.Linq;
 
 namespace CodeGuardAI.WebAPI.Controllers;
 
@@ -12,12 +13,15 @@ namespace CodeGuardAI.WebAPI.Controllers;
 public class DashboardController : ControllerBase
 {
     private readonly AppDbContext _context;
+    private readonly IDashboardService _dashboardService;
 
-    public DashboardController(AppDbContext context)
+    public DashboardController(AppDbContext context, IDashboardService dashboardService)
     {
         _context = context;
+        _dashboardService = dashboardService;
     }
 
+    [AllowAnonymous]
     [HttpGet("metrics")]
     public async Task<IActionResult> GetMetrics()
     {
@@ -30,14 +34,14 @@ public class DashboardController : ControllerBase
         var fixedCount = vulnerabilities.Count(v => v.Status == "Fixed");
         var totalCount = vulnerabilities.Count;
 
-        // Calculate a dynamic risk score from 0 to 100 (where 100 is perfectly secure, i.e. no vulnerabilities)
-        // Deduct points for open vulnerabilities:
-        // Critical: 25 pts, High: 15 pts, Medium: 5 pts, Low: 1 pt
         var totalDeductions = (criticalCount * 25) + (highCount * 15) + (mediumCount * 5) + lowCount;
-        var riskScore = Math.Max(0, 100 - totalDeductions);
+        var riskScore = System.Math.Max(0, 100 - totalDeductions);
 
-        // Retrieve leaderboard ranked
-        var leaderboard = await _context.Leaderboards.OrderBy(l => l.Rank).ToListAsync();
+        var leaderboard = await _context.Leaderboards.OrderByDescending(l => l.Score).ToListAsync();
+        for (int i = 0; i < leaderboard.Count; i++)
+        {
+            leaderboard[i].Rank = i + 1;
+        }
 
         return Ok(new
         {
@@ -50,5 +54,13 @@ public class DashboardController : ControllerBase
             TotalCount = totalCount,
             Leaderboard = leaderboard
         });
+    }
+
+    [AllowAnonymous]
+    [HttpGet("data")]
+    public async Task<IActionResult> GetDashboardData()
+    {
+        var data = await _dashboardService.GetDashboardDataAsync();
+        return Ok(data);
     }
 }

@@ -66,19 +66,36 @@ public class PullRequestController : ControllerBase
             // Perform the merge and push to the repository
             await _gitHubFixerService.MergePullRequestAsync(id);
 
-            // Reward points for merged PR (simple demo logic)
-            var developer = await _context.Leaderboards.FirstOrDefaultAsync(l => l.Name == "John Doe");
-            if (developer != null)
+            var vulnerability = await _context.Vulnerabilities.SingleOrDefaultAsync(v => v.PullRequestId == id);
+
+            // Reward points for merged PR
+            var developerName = !string.IsNullOrWhiteSpace(pr.AuthorName)
+                ? pr.AuthorName
+                : (!string.IsNullOrWhiteSpace(vulnerability?.PusherName) ? vulnerability.PusherName : "John Doe");
+
+            var developer = await _context.Leaderboards.FirstOrDefaultAsync(l => l.Name.ToLower() == developerName.ToLower());
+            if (developer == null)
             {
-                developer.Score += 100;
-                var leaderboard = await _context.Leaderboards.OrderByDescending(l => l.Score).ToListAsync();
-                for (int i = 0; i < leaderboard.Count; i++)
+                developer = new Leaderboard
                 {
-                    leaderboard[i].Rank = i + 1;
-                }
+                    Name = developerName,
+                    Avatar = $"https://api.dicebear.com/7.x/bottts/svg?seed={Uri.EscapeDataString(developerName)}",
+                    Score = 0,
+                    Rank = (await _context.Leaderboards.CountAsync()) + 1
+                };
+                _context.Leaderboards.Add(developer);
+                await _context.SaveChangesAsync();
             }
 
-            var vulnerability = await _context.Vulnerabilities.SingleOrDefaultAsync(v => v.PullRequestId == id);
+            developer.Score += 100;
+            await _context.SaveChangesAsync();
+
+            // Recalculate ranks based on descending score
+            var leaderboard = await _context.Leaderboards.OrderByDescending(l => l.Score).ToListAsync();
+            for (int i = 0; i < leaderboard.Count; i++)
+            {
+                leaderboard[i].Rank = i + 1;
+            }
             await _context.SaveChangesAsync();
 
             return Ok(new

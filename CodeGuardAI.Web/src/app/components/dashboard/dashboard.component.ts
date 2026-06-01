@@ -33,17 +33,28 @@ export class DashboardComponent implements OnInit {
   }
 
   fetchData(): void {
+    this.loading.set(true);
+    
+    // Use a counter or robust way to manage multiple requests. For simplicity, just decrement a counter.
+    let pendingRequests = 2;
+    const checkComplete = () => {
+      pendingRequests--;
+      if (pendingRequests === 0) {
+        this.loading.set(false);
+      }
+    };
+
     this.dashboardService.getDashboardData().subscribe({
       next: (data) => {
         this.dashboardData = data;
-        console.log('Data successfully loaded into component:', this.dashboardData);
+        checkComplete();
       },
       error: (err) => {
         console.error('Failed to load dashboard data', err);
+        checkComplete();
       }
     });
 
-    this.loading.set(true);
     this.dashboardService.getDashboardMetrics().subscribe({
       next: (m) => {
         this.metrics.set(m);
@@ -52,12 +63,12 @@ export class DashboardComponent implements OnInit {
         this.dashboardService.getVulnerabilities().subscribe({
           next: (v) => {
             this.vulnerabilities.set(v);
-            this.loading.set(false);
+            checkComplete();
           },
-          error: () => this.loading.set(false)
+          error: () => checkComplete()
         });
       },
-      error: () => this.loading.set(false)
+      error: () => checkComplete()
     });
   }
 

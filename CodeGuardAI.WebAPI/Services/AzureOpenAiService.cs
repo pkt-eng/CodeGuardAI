@@ -142,12 +142,13 @@ Generate the secure fix and explanation JSON.";
         {
             _logger.LogInformation("Generating Build Fix via Azure OpenAI deployment {DeploymentName} for file: {FilePath}", _deploymentName, filePath);
 
-            var systemPrompt = @"You are a world-class software engineer and secure coding assistant.
+            var systemPrompt = @"You are a world-class software engineer and build failure remediation expert.
 Analyze the provided code file and the compilation or build error message. Generate a correct, clean code replacement that resolves the build failure.
+If there are multiple valid remediation strategies, choose the most reliable one, but also explain alternative viable approaches in the Explanation field.
 You MUST return ONLY a raw JSON object (with no markdown code fences, no ```json formatting, just the raw JSON object) matching the following C# class structure:
 {
   ""SecureCode"": ""[complete secure code replacement of the ENTIRE file, preserving all original import lines, functions, structure, and indentation except the modified fix]"",
-  ""Explanation"": ""[detailed 3-4 sentence explanation of the build failure cause, the mechanism employed to resolve the issue, and best practices]""
+  ""Explanation"": ""[detailed 3-4 sentence explanation of the build failure cause, the mechanism employed to resolve the issue, the chosen approach, and alternate remediation options]""
 }
 
 Important formatting rules:
@@ -155,13 +156,25 @@ Important formatting rules:
 - Ensure newlines inside the JSON strings are escaped as \\n
 - Do NOT include any text outside of the JSON object.";
 
-            var userPrompt = $@"File Path: {filePath}
+            var userPrompt = filePath.EndsWith("package.json", StringComparison.OrdinalIgnoreCase) || filePath.EndsWith("package-lock.json", StringComparison.OrdinalIgnoreCase)
+                ? $@"File Path: {filePath}
+Build Error:
+{errorMessage}
+
+Original Manifest:
+{fileContent}
+
+This error is an npm dependency resolution failure. Update the manifest to fix the version conflict, preserve valid JSON format, and return the full corrected manifest content.
+Include the primary remediation approach and 2-3 alternate approaches in the Explanation, such as upgrading a dependency version, replacing a package, or removing an incompatible peer dependency.
+Generate the secure fix and explanation JSON."
+                : $@"File Path: {filePath}
 Build Error:
 {errorMessage}
 
 Original Code File:
 {fileContent}
 
+If the error can be resolved by one of several possible approaches, choose the safest fix and describe alternate options in the Explanation.
 Generate the secure fix and explanation JSON.";
 
             var requestBody = new

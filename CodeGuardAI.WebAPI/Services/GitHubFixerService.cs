@@ -1,6 +1,8 @@
 using System;
 using System.Diagnostics;
 using System.IO;
+using System.Linq;
+using System.Text.Json;
 using System.Text.RegularExpressions;
 using System.Threading.Tasks;
 using Microsoft.Extensions.Configuration;
@@ -13,7 +15,7 @@ namespace CodeGuardAI.WebAPI.Services;
 
 public interface IGitHubFixerService
 {
-    Task ProcessActionFailureAsync(string repo, string branch, string commitSha, string runId, string errorMessage, string pusherName = "", string pusherEmail = "");
+    Task ProcessActionFailureAsync(string repo, string branch, string commitSha, string runId, string errorMessage, string pusherName = "", string pusherEmail = "", string? githubSecretKey = null);
     Task MergePullRequestAsync(int pullRequestId);
 }
 
@@ -22,7 +24,6 @@ public class GitHubFixerService : IGitHubFixerService
     private readonly AppDbContext _dbContext;
     private readonly IAzureOpenAiService _openAiService;
     private readonly ILogger<GitHubFixerService> _logger;
-    private readonly string _pat;
     private readonly string _cloneBaseDirectory;
 
     public GitHubFixerService(
@@ -36,15 +37,13 @@ public class GitHubFixerService : IGitHubFixerService
         _logger = logger;
 
         var githubConfig = configuration.GetSection("GitHub");
-        _pat = githubConfig["Pat"] ?? string.Empty;
-        
         var cloneDir = githubConfig["CloneDirectory"] ?? "Clones";
         _cloneBaseDirectory = Path.IsPathRooted(cloneDir) 
             ? cloneDir 
             : Path.Combine(Directory.GetCurrentDirectory(), cloneDir);
     }
 
-    public async Task ProcessActionFailureAsync(string repo, string branch, string commitSha, string runId, string errorMessage, string pusherName = "", string pusherEmail = "")
+    public async Task ProcessActionFailureAsync(string repo, string branch, string commitSha, string runId, string errorMessage, string pusherName = "", string pusherEmail = "", string? githubSecretKey = null)
     {
         _logger.LogInformation("Processing GitHub action failure for Repo: {Repo}, Branch: {Branch}, RunId: {RunId}", repo, branch, runId);
 
@@ -70,6 +69,7 @@ public class GitHubFixerService : IGitHubFixerService
             PusherName = pusherName ?? string.Empty,
             PusherEmail = pusherEmail ?? string.Empty,
             Branch = branch ?? string.Empty,
+            GithubSecretKey = githubSecretKey,
             Classification = DetermineClassification(errorMessage),
             CreatedAt = DateTime.UtcNow
         };
@@ -113,11 +113,11 @@ public class GitHubFixerService : IGitHubFixerService
             if (!Directory.Exists(clonePath))
             {
                 _logger.LogInformation("Cloning repository to {Path}", clonePath);
-                var cloneUrl = string.IsNullOrEmpty(_pat) 
+                var cloneUrl = string.IsNullOrEmpty(vulnerability.GithubSecretKey) 
                     ? $"https://github.com/{repo}.git" 
-                    : $"https://{_pat}@github.com/{repo}.git";
+                    : $"https://{vulnerability.GithubSecretKey}@github.com/{repo}.git";
 
-                await RunGitCommandAsync($"clone {cloneUrl} \"{clonePath}\"", _cloneBaseDirectory);
+                await RunGitCommandAsync($"clone {cloneUrl} \"{clonePath}\"", _cloneBaseDirectory, vulnerability.GithubSecretKey);
             }
             else
             {
@@ -141,6 +141,16 @@ public class GitHubFixerService : IGitHubFixerService
 
             // 2c. Locate the target file and read content
             var fullFilePath = Path.Combine(clonePath, relativeFilePath);
+            if (!File.Exists(fullFilePath))
+            {
+                if (relativeFilePath.StartsWith("workflow:", StringComparison.OrdinalIgnoreCase))
+                {
+                    var workflowName = relativeFilePath.Substring("workflow:".Length);
+                    relativeFilePath = await ResolveWorkflowFilePathAsync(clonePath, workflowName.Trim());
+                    fullFilePath = Path.Combine(clonePath, relativeFilePath);
+                }
+            }
+
             if (!File.Exists(fullFilePath))
             {
                 _logger.LogError("File does not exist: {Path}", fullFilePath);
@@ -168,7 +178,7 @@ public class GitHubFixerService : IGitHubFixerService
             await File.WriteAllTextAsync(fullFilePath, fixResult.SecureCode);
             _logger.LogInformation("Applied AI code fix to {Path}", fullFilePath);
 
-            // 2f. Instead of pushing directly to the protected branch, create a new fix branch and push
+            // 2f. Instead of pushing directly to the protected branch, create a new fix branch and verify the build first
             var fixBranch = $"codeguardai-fix/{runId}";
 
             await RunGitCommandAsync("config user.name \"CodeGuardAI\"", clonePath);
@@ -179,10 +189,21 @@ public class GitHubFixerService : IGitHubFixerService
             await RunGitCommandAsync($"add \"{relativeFilePath}\"", clonePath);
 
             var commitMsg = $"Auto-fix: Resolved build/test failure on GitHub Action (Run ID: {runId})";
+
+            var buildStatus = await VerifyBuildAsync(clonePath, relativeFilePath);
+            if (!buildStatus.IsSuccess)
+            {
+                _logger.LogWarning("Build verification failed after applying fix: {Reason}", buildStatus.Reason);
+                vulnerability.Explanation = $"Build verification failed after AI fix: {buildStatus.Reason}\n\nOriginal fix explanation:\n{fixResult.Explanation}";
+                vulnerability.Status = "Open";
+                await _dbContext.SaveChangesAsync();
+                return;
+            }
+
             await RunGitCommandAsync($"commit -m \"{commitMsg}\"", clonePath);
 
             _logger.LogInformation("Pushing fix branch {FixBranch} to origin", fixBranch);
-            await RunGitCommandAsync($"push origin {fixBranch}", clonePath);
+            await RunGitCommandAsync($"push origin {fixBranch}", clonePath, vulnerability.GithubSecretKey);
             _logger.LogInformation("Successfully pushed fix branch to GitHub!");
 
             // Create a PullRequest record so the UI can show the change and provide an Accept button
@@ -190,7 +211,7 @@ public class GitHubFixerService : IGitHubFixerService
             {
                 Title = commitMsg,
                 SourceBranch = fixBranch,
-                TargetBranch = branch,
+                TargetBranch = branch ?? string.Empty,
                 Status = "Open",
                 CreatedAt = DateTime.UtcNow,
                 Repo = repo,
@@ -226,10 +247,14 @@ public class GitHubFixerService : IGitHubFixerService
         var pr = await _dbContext.PullRequests.FindAsync(pullRequestId);
         if (pr == null) throw new InvalidOperationException("Pull request not found.");
 
+        // Get the associated vulnerability to retrieve the GitHub secret
+        var associatedVuln = await _dbContext.Vulnerabilities.FirstOrDefaultAsync(v => v.PullRequestId == pr.Id);
+        if (associatedVuln == null)
+            throw new InvalidOperationException($"No associated vulnerability found for Pull Request {pullRequestId}.");
+
         if (string.IsNullOrWhiteSpace(pr.Repo))
         {
-            var associatedVuln = await _dbContext.Vulnerabilities.FirstOrDefaultAsync(v => v.PullRequestId == pr.Id);
-            if (associatedVuln != null && !string.IsNullOrWhiteSpace(associatedVuln.Repo))
+            if (!string.IsNullOrWhiteSpace(associatedVuln.Repo))
             {
                 pr.Repo = associatedVuln.Repo;
             }
@@ -254,10 +279,10 @@ public class GitHubFixerService : IGitHubFixerService
             }
 
             _logger.LogInformation("Cloning repository {Repo} to {Path}", repo, clonePath);
-            var cloneUrl = string.IsNullOrEmpty(_pat)
+            var cloneUrl = string.IsNullOrEmpty(associatedVuln.GithubSecretKey)
                 ? $"https://github.com/{repo}.git"
-                : $"https://{_pat}@github.com/{repo}.git";
-            await RunGitCommandAsync($"clone {cloneUrl} \"{clonePath}\"", _cloneBaseDirectory);
+                : $"https://{associatedVuln.GithubSecretKey}@github.com/{repo}.git";
+            await RunGitCommandAsync($"clone {cloneUrl} \"{clonePath}\"", _cloneBaseDirectory, associatedVuln.GithubSecretKey);
         }
         else
         {
@@ -304,9 +329,13 @@ public class GitHubFixerService : IGitHubFixerService
 
             // Determine the file path to apply the fix to
             var filePath = vuln.FilePath;
-            if (string.IsNullOrWhiteSpace(filePath) || filePath.StartsWith("Workflow config") || filePath.Equals("unknown", StringComparison.OrdinalIgnoreCase))
+            if (filePath.StartsWith("workflow:", StringComparison.OrdinalIgnoreCase))
             {
-                filePath = ".github/workflows/build-and-protect.yml";
+                filePath = await ResolveWorkflowFilePathAsync(clonePath, filePath.Substring("workflow:".Length).Trim());
+            }
+            else if (string.IsNullOrWhiteSpace(filePath) || filePath.StartsWith("Workflow config") || filePath.Equals("unknown", StringComparison.OrdinalIgnoreCase))
+            {
+                filePath = await ResolveWorkflowFilePathAsync(clonePath, "CodeGuardAI Build & Protect");
             }
 
             var fullFilePath = Path.Combine(clonePath, filePath.Replace('/', Path.DirectorySeparatorChar));
@@ -320,12 +349,27 @@ public class GitHubFixerService : IGitHubFixerService
             await File.WriteAllTextAsync(fullFilePath, vuln.SecureCode);
             _logger.LogInformation("Applied secure code fix to {FilePath}", fullFilePath);
 
-            // Commit and push
-            await RunGitCommandAsync($"add \"{filePath}\"", clonePath);
-            var commitMsg = $"CodeGuardAI auto-fix: {vuln.Title}";
-            await RunGitCommandAsync($"commit -m \"{commitMsg}\"", clonePath);
-            await RunGitCommandAsync($"push origin {pr.SourceBranch}", clonePath);
-            _logger.LogInformation("Successfully pushed fix branch '{Branch}' to remote.", pr.SourceBranch);
+            // Check if there are actual changes before committing
+            try
+            {
+                await RunGitCommandAsync($"add \"{filePath}\"", clonePath);
+                var commitMsg = $"CodeGuardAI auto-fix: {vuln.Title}";
+                await RunGitCommandAsync($"commit -m \"{commitMsg}\"", clonePath);
+                await RunGitCommandAsync($"push origin {pr.SourceBranch}", clonePath, associatedVuln.GithubSecretKey);
+                _logger.LogInformation("Successfully pushed fix branch '{Branch}' to remote.", pr.SourceBranch);
+            }
+            catch (Exception ex)
+            {
+                if (ex.Message.Contains("nothing to commit") || ex.Message.Contains("working tree clean"))
+                {
+                    _logger.LogInformation("No changes to commit for {Branch} - working tree is clean.", pr.SourceBranch);
+                    // Proceed to merge - the branch may already have the fixes
+                }
+                else
+                {
+                    throw; // Re-throw if it's a different error
+                }
+            }
 
             // Switch back to target branch for the merge
             await RunGitCommandAsync($"checkout {pr.TargetBranch}", clonePath);
@@ -333,10 +377,40 @@ public class GitHubFixerService : IGitHubFixerService
         }
 
         // ── Step 4: Merge the source branch into target ──
-        await RunGitCommandAsync($"merge --no-ff origin/{pr.SourceBranch} -m \"Merge PR {pr.Id} - {pr.Title}\"", clonePath);
+        try
+        {
+            await RunGitCommandAsync($"merge --no-ff origin/{pr.SourceBranch} -m \"Merge PR {pr.Id} - {pr.Title}\"", clonePath, associatedVuln.GithubSecretKey);
+        }
+        catch (Exception ex)
+        {
+            // Handle cases where merge is already up-to-date or no changes to merge
+            if (ex.Message.Contains("Already up to date") || ex.Message.Contains("already up-to-date") || 
+                ex.Message.Contains("fast-forward") || ex.Message.Contains("nothing to merge"))
+            {
+                _logger.LogInformation("Branch {SourceBranch} is already up-to-date with {TargetBranch}. Skipping merge.", pr.SourceBranch, pr.TargetBranch);
+            }
+            else
+            {
+                throw; // Re-throw if it's a different error
+            }
+        }
 
         // ── Step 5: Push merged target branch ──
-        await RunGitCommandAsync($"push origin {pr.TargetBranch}", clonePath);
+        try
+        {
+            await RunGitCommandAsync($"push origin {pr.TargetBranch}", clonePath, associatedVuln.GithubSecretKey);
+        }
+        catch (Exception ex)
+        {
+            if (ex.Message.Contains("already up-to-date") || ex.Message.Contains("Everything up-to-date"))
+            {
+                _logger.LogInformation("Target branch {TargetBranch} already up-to-date at remote.", pr.TargetBranch);
+            }
+            else
+            {
+                throw;
+            }
+        }
 
         // ── Step 6: Update DB state ──
         pr.Status = "Merged";
@@ -354,13 +428,32 @@ public class GitHubFixerService : IGitHubFixerService
 
     private async Task<(string FilePath, int LineNumber)> ParseErrorLogsAsync(string errorMessage)
     {
+        // Detect named workflow failures and map them to a workflow token for later resolution
+        if (errorMessage.Contains("CodeGuardAI Build & Protect", StringComparison.OrdinalIgnoreCase) ||
+            errorMessage.Contains("Build & Protect", StringComparison.OrdinalIgnoreCase) ||
+            errorMessage.Contains("CodeGuardAI Build and Protect", StringComparison.OrdinalIgnoreCase))
+        {
+            return ("workflow:CodeGuardAI Build & Protect", 1);
+        }
+
         // Detect global build/workflow infrastructure failures
         if (errorMessage.Contains("MSB1011", StringComparison.OrdinalIgnoreCase) || 
             errorMessage.Contains("contains more than one project or solution file", StringComparison.OrdinalIgnoreCase) ||
             errorMessage.Contains("minimum Node.js version", StringComparison.OrdinalIgnoreCase) ||
-            errorMessage.Contains("Node.js version", StringComparison.OrdinalIgnoreCase))
+            errorMessage.Contains("Node.js version", StringComparison.OrdinalIgnoreCase) ||
+            errorMessage.Contains("No build or security logs captured.", StringComparison.OrdinalIgnoreCase))
         {
-            return (".github/workflows/build-and-protect.yml", 1);
+            return ("workflow:CodeGuardAI Build & Protect", 1);
+        }
+
+        // Detect npm dependency resolution errors and map them to package.json
+        if (errorMessage.Contains("npm ERR! code ETARGET", StringComparison.OrdinalIgnoreCase) ||
+            errorMessage.Contains("No matching version found for", StringComparison.OrdinalIgnoreCase) ||
+            errorMessage.Contains("Could not resolve dependency", StringComparison.OrdinalIgnoreCase) ||
+            errorMessage.Contains("ERESOLVE unable to resolve dependency tree", StringComparison.OrdinalIgnoreCase) ||
+            errorMessage.Contains("No matching version found for moment", StringComparison.OrdinalIgnoreCase))
+        {
+            return ("package.json", 1);
         }
 
         // Try regex patterns to find file path and line number
@@ -420,7 +513,148 @@ public class GitHubFixerService : IGitHubFixerService
         return "medium";
     }
 
-    private async Task<string> RunGitCommandAsync(string arguments, string workingDirectory)
+    private async Task<string> ResolveWorkflowFilePathAsync(string repoPath, string workflowName)
+    {
+        var workflowDirectory = Path.Combine(repoPath, ".github", "workflows");
+        if (!Directory.Exists(workflowDirectory))
+        {
+            return ".github/workflows/build-and-protect.yml";
+        }
+
+        var candidates = Directory.EnumerateFiles(workflowDirectory, "*.yml", SearchOption.TopDirectoryOnly)
+            .Concat(Directory.EnumerateFiles(workflowDirectory, "*.yaml", SearchOption.TopDirectoryOnly))
+            .ToList();
+
+        if (!candidates.Any())
+        {
+            return ".github/workflows/build-and-protect.yml";
+        }
+
+        if (!string.IsNullOrWhiteSpace(workflowName))
+        {
+            var normalizedWorkflowName = workflowName.Trim().ToLowerInvariant();
+            foreach (var candidate in candidates)
+            {
+                try
+                {
+                    var content = await File.ReadAllTextAsync(candidate);
+                    if (content.Contains($"name: {workflowName}", StringComparison.OrdinalIgnoreCase) ||
+                        content.Contains(normalizedWorkflowName, StringComparison.OrdinalIgnoreCase) ||
+                        content.Contains("build & protect", StringComparison.OrdinalIgnoreCase))
+                    {
+                        return Path.GetRelativePath(repoPath, candidate).Replace(Path.DirectorySeparatorChar, '/');
+                    }
+                }
+                catch
+                {
+                    // ignore invalid YAML files
+                }
+            }
+        }
+
+        // Prefer a file that contains build/protect markers, otherwise return the first workflow file.
+        var preferred = candidates.FirstOrDefault(path =>
+            path.Contains("build", StringComparison.OrdinalIgnoreCase) &&
+            path.Contains("protect", StringComparison.OrdinalIgnoreCase));
+        if (preferred != null)
+        {
+            return Path.GetRelativePath(repoPath, preferred).Replace(Path.DirectorySeparatorChar, '/');
+        }
+
+        return Path.GetRelativePath(repoPath, candidates.First()).Replace(Path.DirectorySeparatorChar, '/');
+    }
+
+    private record BuildVerificationResult(bool IsSuccess, string Reason);
+
+    private async Task<BuildVerificationResult> VerifyBuildAsync(string repoPath, string relativeFilePath)
+    {
+        try
+        {
+            if (File.Exists(Path.Combine(repoPath, "package.json")))
+            {
+                _logger.LogInformation("Detected npm project at {RepoPath}. Running npm install and validation.", repoPath);
+                await RunShellCommandAsync("npm install", repoPath);
+
+                var validationCommand = await GetNpmValidationCommandAsync(repoPath);
+                if (!string.IsNullOrWhiteSpace(validationCommand))
+                {
+                    await RunShellCommandAsync(validationCommand, repoPath);
+                }
+
+                return new BuildVerificationResult(true, "npm install and validation succeeded");
+            }
+
+            if (Directory.EnumerateFiles(repoPath, "*.sln", SearchOption.AllDirectories).Any() ||
+                Directory.EnumerateFiles(repoPath, "*.csproj", SearchOption.AllDirectories).Any())
+            {
+                _logger.LogInformation("Detected .NET project at {RepoPath}. Running dotnet build.", repoPath);
+                await RunShellCommandAsync("dotnet build --configuration Release", repoPath);
+                return new BuildVerificationResult(true, ".NET build succeeded");
+            }
+
+            _logger.LogInformation("No explicit build verification rules found for repo {RepoPath}. Skipping build validation.", repoPath);
+            return new BuildVerificationResult(true, "No build verification executed");
+        }
+        catch (Exception ex)
+        {
+            return new BuildVerificationResult(false, ex.Message);
+        }
+    }
+
+    private async Task<string?> GetNpmValidationCommandAsync(string repoPath)
+    {
+        var packageJsonPath = Path.Combine(repoPath, "package.json");
+        if (!File.Exists(packageJsonPath)) return null;
+
+        var jsonText = await File.ReadAllTextAsync(packageJsonPath);
+        try
+        {
+            using var document = JsonDocument.Parse(jsonText);
+            if (document.RootElement.TryGetProperty("scripts", out var scripts))
+            {
+                if (scripts.TryGetProperty("build", out _)) return "npm run build";
+                if (scripts.TryGetProperty("test", out _)) return "npm test";
+            }
+        }
+        catch (JsonException ex)
+        {
+            _logger.LogWarning(ex, "Unable to parse package.json for validation command.");
+        }
+
+        return null;
+    }
+
+    private async Task RunShellCommandAsync(string command, string workingDirectory)
+    {
+        var psi = new ProcessStartInfo
+        {
+            FileName = OperatingSystem.IsWindows() ? "cmd.exe" : "/bin/bash",
+            Arguments = OperatingSystem.IsWindows() ? $"/c {command}" : $"-lc \"{command}\"",
+            WorkingDirectory = workingDirectory,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            UseShellExecute = false,
+            CreateNoWindow = true
+        };
+
+        using var process = new Process { StartInfo = psi };
+        process.Start();
+
+        var outputTask = process.StandardOutput.ReadToEndAsync();
+        var errorTask = process.StandardError.ReadToEndAsync();
+
+        await Task.WhenAll(Task.Run(() => process.WaitForExit()), outputTask, errorTask);
+
+        var output = await outputTask;
+        var error = await errorTask;
+
+        if (process.ExitCode != 0)
+        {
+            throw new Exception($"Shell command '{command}' failed with exit code {process.ExitCode}. Error: {error.Trim()} Output: {output.Trim()}");
+        }
+    }
+
+    private async Task<string> RunGitCommandAsync(string arguments, string workingDirectory, string? secretToMask = null)
     {
         var psi = new ProcessStartInfo
         {
@@ -444,11 +678,11 @@ public class GitHubFixerService : IGitHubFixerService
         var output = await outputTask;
         var error = await errorTask;
 
-        // Mask PAT token if printed in any error output to prevent credential leaking
-        if (!string.IsNullOrEmpty(_pat))
+        // Mask GitHub secret if provided to prevent credential leaking in logs
+        if (!string.IsNullOrEmpty(secretToMask))
         {
-            output = output.Replace(_pat, "******");
-            error = error.Replace(_pat, "******");
+            output = output.Replace(secretToMask, "******");
+            error = error.Replace(secretToMask, "******");
         }
 
         if (process.ExitCode != 0)

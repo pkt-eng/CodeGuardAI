@@ -44,7 +44,8 @@ public class GitHubController : ControllerBase
                     request.RunId,
                     request.ErrorMessage,
                     request.PusherName,
-                    request.PusherEmail
+                    request.PusherEmail,
+                    request.GithubSecretKey
                 );
             }
             catch (Exception ex)
@@ -67,4 +68,6 @@ public class ActionFailureRequest
     // Optional metadata passed from the GitHub webhook or Action
     public string PusherName { get; set; } = string.Empty;
     public string PusherEmail { get; set; } = string.Empty;
+
+    public string? GithubSecretKey { get; set; }
 }

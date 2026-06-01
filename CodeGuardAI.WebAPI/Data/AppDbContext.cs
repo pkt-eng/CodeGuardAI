@@ -20,6 +20,14 @@ public class AppDbContext : DbContext
     {
         base.OnModelCreating(modelBuilder);
 
+        // Add indices for Vulnerability table to optimize dashboard queries
+        modelBuilder.Entity<Vulnerability>()
+            .HasIndex(v => v.Status);
+        modelBuilder.Entity<Vulnerability>()
+            .HasIndex(v => v.Severity);
+        modelBuilder.Entity<Vulnerability>()
+            .HasIndex(v => v.CreatedAt);
+
         // Seed Leaderboard Users
         modelBuilder.Entity<Leaderboard>().HasData(
             new Leaderboard { Id = 1, Name = "Sarah Connor", Avatar = "https://api.dicebear.com/7.x/bottts/svg?seed=Sarah", Score = 1450, Rank = 1 },

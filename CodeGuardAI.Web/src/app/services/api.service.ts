@@ -2,7 +2,6 @@ import { Injectable, signal, computed } from '@angular/core';
 import { HttpClient, HttpHeaders } from '@angular/common/http';
 import { Observable, of, tap } from 'rxjs';
 import { DashboardPayload } from '../models/dashboard.model';
-import { mockDashboardData } from '../models/dashboard.data';
 
 export interface UserDto {
   id: number;
@@ -144,8 +143,7 @@ export class ApiService {
     return this.http.post<any>(`${this.baseUrl}/pullrequest/${id}/merge`, {}, { headers: this.getHeaders() });
   }
 
-   getDashboardData(): Observable<DashboardPayload> {
-    // Simulating an API call to fetch the data
-    return of(mockDashboardData);
+  getDashboardData(): Observable<DashboardPayload> {
+    return this.http.get<DashboardPayload>(`${this.baseUrl}/dashboard/data`, { headers: this.getHeaders() });
   }
 }

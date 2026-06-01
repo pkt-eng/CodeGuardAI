@@ -199,13 +199,15 @@ namespace CodeGuardAI.WebAPI.Migrations
                         .IsRequired()
                         .HasColumnType("nvarchar(max)");
 
+                    b.Property<string>("GithubSecretKey")
+                        .HasColumnType("nvarchar(max)")
+                        .HasComment("GitHub Personal Access Token (PAT) for authentication - stored per vulnerability");
+
                     b.Property<int>("LineNumber")
                         .HasColumnType("int");
 
                     b.Property<int?>("PullRequestId")
-                        .HasColumnType("int");
-
-                    b.Property<string>("PusherEmail")
+                        .HasColumnType("int")
                         .IsRequired()
                         .HasColumnType("nvarchar(max)");
 

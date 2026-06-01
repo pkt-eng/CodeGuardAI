@@ -9,6 +9,7 @@ using Microsoft.Extensions.Hosting;
 using Microsoft.IdentityModel.Tokens;
 using CodeGuardAI.WebAPI.Data;
 using CodeGuardAI.WebAPI.Services;
+using CodeGuardAI.WebAPI.Repositories;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -22,6 +23,10 @@ builder.Services.AddSwaggerGen();
 // Configure EF Core with Microsoft SQL Server
 builder.Services.AddDbContext<AppDbContext>(options =>
     options.UseSqlServer(builder.Configuration.GetConnectionString("DefaultConnection")));
+
+// Configure Repositories & Services
+builder.Services.AddScoped<IDashboardRepository, DashboardRepository>();
+builder.Services.AddScoped<IDashboardService, DashboardService>();
 
 // Configure HttpClient and Azure OpenAI Service
 builder.Services.AddHttpClient<IAzureOpenAiService, AzureOpenAiService>();
