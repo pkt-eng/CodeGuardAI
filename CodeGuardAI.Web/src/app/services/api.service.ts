@@ -1,6 +1,8 @@
 import { Injectable, signal, computed } from '@angular/core';
 import { HttpClient, HttpHeaders } from '@angular/common/http';
-import { Observable, tap } from 'rxjs';
+import { Observable, of, tap } from 'rxjs';
+import { DashboardPayload } from '../models/dashboard.model';
+import { mockDashboardData } from '../models/dashboard.data';
 
 export interface UserDto {
   id: number;
@@ -72,7 +74,8 @@ export interface DashboardMetrics {
   providedIn: 'root'
 })
 export class ApiService {
-  private readonly baseUrl = 'http://localhost:5142/api';
+   private readonly baseUrl = 'http://localhost:5142/api';
+   //private readonly baseUrl = ' https://president-appetizer-demanding.ngrok-free.dev/api';
 
   // Signals for state management
   readonly currentUser = signal<UserDto | null>(this.loadUserFromStorage());
@@ -139,5 +142,10 @@ export class ApiService {
 
   mergePullRequest(id: number): Observable<any> {
     return this.http.post<any>(`${this.baseUrl}/pullrequest/${id}/merge`, {}, { headers: this.getHeaders() });
+  }
+
+   getDashboardData(): Observable<DashboardPayload> {
+    // Simulating an API call to fetch the data
+    return of(mockDashboardData);
   }
 }

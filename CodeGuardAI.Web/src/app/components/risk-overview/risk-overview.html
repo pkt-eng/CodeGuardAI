@@ -1,0 +1,21 @@
+<div class="risk-overview-container" *ngIf="data && data.length > 0">
+  
+  <div class="chart-wrapper">
+    <canvas baseChart 
+      [data]="chartData" 
+      [options]="chartOptions" 
+      type="doughnut">
+    </canvas>
+  </div>
+
+  <div class="custom-legend">
+    <div class="legend-item" *ngFor="let item of displayData">
+      <span class="color-box" [style.backgroundColor]="item.colorCode"></span>
+      <div class="legend-text">
+        <span class="label">{{ item.label }}</span>
+        <span class="count">{{ item.count }}</span>
+      </div>
+    </div>
+  </div>
+  
+</div>
