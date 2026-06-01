@@ -15,6 +15,10 @@ var builder = WebApplication.CreateBuilder(args);
 // Add services to the container.
 builder.Services.AddControllers();
 
+// Add Swagger/OpenAPI
+builder.Services.AddEndpointsApiExplorer();
+builder.Services.AddSwaggerGen();
+
 // Configure EF Core with Microsoft SQL Server
 builder.Services.AddDbContext<AppDbContext>(options =>
     options.UseSqlServer(builder.Configuration.GetConnectionString("DefaultConnection")));
@@ -78,6 +82,13 @@ if (app.Environment.IsDevelopment())
     {
         Console.WriteLine($"Error applying migrations: {ex.Message}");
     }
+
+    // Enable Swagger in Development only
+    app.UseSwagger();
+    app.UseSwaggerUI(c =>
+    {
+        c.SwaggerEndpoint("/swagger/v1/swagger.json", "CodeGuardAI API V1");
+    });
 }
 
 app.UseCors("AllowAngular");
