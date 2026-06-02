@@ -144,6 +144,7 @@ Generate the secure fix and explanation JSON.";
 
             var systemPrompt = @"You are a world-class software engineer and build failure remediation expert.
 Analyze the provided code file and the compilation or build error message. Generate a correct, clean code replacement that resolves the build failure.
+In the Explanation, clearly state the issue being fixed and the exact code change applied.
 If there are multiple valid remediation strategies, choose the most reliable one, but also explain alternative viable approaches in the Explanation field.
 You MUST return ONLY a raw JSON object (with no markdown code fences, no ```json formatting, just the raw JSON object) matching the following C# class structure:
 {
@@ -231,6 +232,13 @@ Generate the secure fix and explanation JSON.";
                 throw new InvalidOperationException("Failed to generate a valid build fix.");
             }
 
+            if ((filePath.EndsWith("package.json", StringComparison.OrdinalIgnoreCase) ||
+                 filePath.EndsWith("package-lock.json", StringComparison.OrdinalIgnoreCase)) &&
+                !IsValidJson(result.SecureCode))
+            {
+                throw new InvalidOperationException("Generated package manifest is not valid JSON.");
+            }
+
             return result;
         }
         catch (Exception ex)
@@ -239,8 +247,21 @@ Generate the secure fix and explanation JSON.";
             return new RemediationResult
             {
                 SecureCode = fileContent,
-                Explanation = $"Build Fix failed to generate: {ex.Message}. Check logs for details."
+                Explanation = $"Build Fix failed to generate a safe fix for '{filePath}': {ex.Message}. Manual review is required."
             };
+        }
+    }
+
+    private bool IsValidJson(string json)
+    {
+        try
+        {
+            using var doc = JsonDocument.Parse(json);
+            return true;
+        }
+        catch
+        {
+            return false;
         }
     }
 

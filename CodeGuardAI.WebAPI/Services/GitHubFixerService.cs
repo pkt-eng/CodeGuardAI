@@ -38,8 +38,8 @@ public class GitHubFixerService : IGitHubFixerService
 
         var githubConfig = configuration.GetSection("GitHub");
         var cloneDir = githubConfig["CloneDirectory"] ?? "Clones";
-        _cloneBaseDirectory = Path.IsPathRooted(cloneDir) 
-            ? cloneDir 
+        _cloneBaseDirectory = Path.IsPathRooted(cloneDir)
+            ? cloneDir
             : Path.Combine(Directory.GetCurrentDirectory(), cloneDir);
     }
 
@@ -104,7 +104,7 @@ public class GitHubFixerService : IGitHubFixerService
 
             // 2b. Clone or pull the repository
             var clonePath = Path.Combine(_cloneBaseDirectory, repoName);
-            
+
             if (!Directory.Exists(_cloneBaseDirectory))
             {
                 Directory.CreateDirectory(_cloneBaseDirectory);
@@ -113,8 +113,8 @@ public class GitHubFixerService : IGitHubFixerService
             if (!Directory.Exists(clonePath))
             {
                 _logger.LogInformation("Cloning repository to {Path}", clonePath);
-                var cloneUrl = string.IsNullOrEmpty(vulnerability.GithubSecretKey) 
-                    ? $"https://github.com/{repo}.git" 
+                var cloneUrl = string.IsNullOrEmpty(vulnerability.GithubSecretKey)
+                    ? $"https://github.com/{repo}.git"
                     : $"https://{vulnerability.GithubSecretKey}@github.com/{repo}.git";
 
                 await RunGitCommandAsync($"clone {cloneUrl} \"{clonePath}\"", _cloneBaseDirectory, vulnerability.GithubSecretKey);
@@ -163,13 +163,36 @@ public class GitHubFixerService : IGitHubFixerService
             vulnerability.VulnerableCode = originalContent.Length > 4000 ? originalContent[..4000] : originalContent;
             await _dbContext.SaveChangesAsync();
 
-            // 2d. Generate build fix using Azure OpenAI
-            var fixResult = await _openAiService.GenerateBuildFixAsync(relativeFilePath, originalContent, errorMessage);
-            
+            // 2d. Choose the remediation mode based on the failure type
+            var isSecurityIssue = IsSecurityFindingError(errorMessage) || relativeFilePath.EndsWith(".html", StringComparison.OrdinalIgnoreCase) ||
+                relativeFilePath.EndsWith(".ts", StringComparison.OrdinalIgnoreCase);
+
+            RemediationResult fixResult;
+            if (isSecurityIssue)
+            {
+                _logger.LogInformation("Detected security issue in logs. Using secure fix flow for {FilePath}", relativeFilePath);
+                fixResult = await _openAiService.GenerateSecureFixAsync(vulnerability.Title, relativeFilePath, originalContent);
+            }
+            else
+            {
+                fixResult = await _openAiService.GenerateBuildFixAsync(relativeFilePath, originalContent, errorMessage);
+            }
+
             if (string.IsNullOrWhiteSpace(fixResult.SecureCode) || fixResult.SecureCode == originalContent)
             {
                 _logger.LogWarning("No changes suggested by OpenAI or fix generation failed.");
                 vulnerability.Explanation = $"Build failure on branch '{branch}'. AI analyzed the file '{relativeFilePath}' but could not generate a fix. Manual review required.\n\nError:\n{(errorMessage.Length > 2000 ? errorMessage[..2000] : errorMessage)}";
+                await _dbContext.SaveChangesAsync();
+                return;
+            }
+
+            if ((relativeFilePath.EndsWith("package.json", StringComparison.OrdinalIgnoreCase) ||
+                 relativeFilePath.EndsWith("package-lock.json", StringComparison.OrdinalIgnoreCase)) &&
+                !IsValidJson(fixResult.SecureCode))
+            {
+                _logger.LogWarning("AI generated invalid JSON for {FilePath}. Aborting fix.", relativeFilePath);
+                vulnerability.Explanation = $"Build failure on branch '{branch}'. AI attempted a package manifest fix for '{relativeFilePath}', but the generated content was not valid JSON. Manual review is required.\n\nOriginal Error:\n{(errorMessage.Length > 2000 ? errorMessage[..2000] : errorMessage)}";
+                vulnerability.Status = "Open";
                 await _dbContext.SaveChangesAsync();
                 return;
             }
@@ -384,7 +407,7 @@ public class GitHubFixerService : IGitHubFixerService
         catch (Exception ex)
         {
             // Handle cases where merge is already up-to-date or no changes to merge
-            if (ex.Message.Contains("Already up to date") || ex.Message.Contains("already up-to-date") || 
+            if (ex.Message.Contains("Already up to date") || ex.Message.Contains("already up-to-date") ||
                 ex.Message.Contains("fast-forward") || ex.Message.Contains("nothing to merge"))
             {
                 _logger.LogInformation("Branch {SourceBranch} is already up-to-date with {TargetBranch}. Skipping merge.", pr.SourceBranch, pr.TargetBranch);
@@ -437,13 +460,27 @@ public class GitHubFixerService : IGitHubFixerService
         }
 
         // Detect global build/workflow infrastructure failures
-        if (errorMessage.Contains("MSB1011", StringComparison.OrdinalIgnoreCase) || 
+        if (errorMessage.Contains("MSB1011", StringComparison.OrdinalIgnoreCase) ||
             errorMessage.Contains("contains more than one project or solution file", StringComparison.OrdinalIgnoreCase) ||
             errorMessage.Contains("minimum Node.js version", StringComparison.OrdinalIgnoreCase) ||
             errorMessage.Contains("Node.js version", StringComparison.OrdinalIgnoreCase) ||
             errorMessage.Contains("No build or security logs captured.", StringComparison.OrdinalIgnoreCase))
         {
             return ("workflow:CodeGuardAI Build & Protect", 1);
+        }
+
+        // Detect security scan finding lines and prioritize the affected source file.
+        var securityFindingPattern = new Regex(@"(\./?[\w\-\.\/]+\.(html|ts|js|jsx|tsx|cs)):?(\d+)?", RegexOptions.IgnoreCase);
+        if (errorMessage.Contains("SECURITY_FINDING", StringComparison.OrdinalIgnoreCase) ||
+            errorMessage.Contains("security finding", StringComparison.OrdinalIgnoreCase))
+        {
+            var securityMatch = securityFindingPattern.Match(errorMessage);
+            if (securityMatch.Success)
+            {
+                var filePath = securityMatch.Groups[1].Value.Replace("./", string.Empty);
+                int.TryParse(securityMatch.Groups[3].Value, out var line);
+                return (filePath, line == 0 ? 1 : line);
+            }
         }
 
         // Detect npm dependency resolution errors and map them to package.json
@@ -459,21 +496,21 @@ public class GitHubFixerService : IGitHubFixerService
         // Try regex patterns to find file path and line number
         // Standard TS/Angular pattern: src/app/app.component.ts:12:3 - error TS2304...
         var tsPattern = new Regex(@"([a-zA-Z0-9_\-\.\/]+\.[a-zA-Z0-9]+):(\d+):(\d+)");
-        var match = tsPattern.Match(errorMessage);
-        if (match.Success)
+        var tsMatch = tsPattern.Match(errorMessage);
+        if (tsMatch.Success)
         {
-            var filePath = match.Groups[1].Value;
-            int.TryParse(match.Groups[2].Value, out var line);
+            var filePath = tsMatch.Groups[1].Value;
+            int.TryParse(tsMatch.Groups[2].Value, out var line);
             return (filePath, line);
         }
 
         // Parentheses pattern: src/app/app.ts(12,3)
         var parenPattern = new Regex(@"([a-zA-Z0-9_\-\.\/]+\.[a-zA-Z0-9]+)\((\d+),\d+\)");
-        match = parenPattern.Match(errorMessage);
-        if (match.Success)
+        var parenMatch = parenPattern.Match(errorMessage);
+        if (parenMatch.Success)
         {
-            var filePath = match.Groups[1].Value;
-            int.TryParse(match.Groups[2].Value, out var line);
+            var filePath = parenMatch.Groups[1].Value;
+            int.TryParse(parenMatch.Groups[2].Value, out var line);
             return (filePath, line);
         }
 
@@ -501,7 +538,7 @@ public class GitHubFixerService : IGitHubFixerService
 
         var lower = errorMessage.ToLowerInvariant();
 
-        if (lower.Contains("fatal") || lower.Contains("exception") || lower.Contains("segfault") || lower.Contains("panic") || lower.Contains("failed to load") )
+        if (lower.Contains("fatal") || lower.Contains("exception") || lower.Contains("segfault") || lower.Contains("panic") || lower.Contains("failed to load"))
             return "critical";
 
         if (lower.Contains("error") || lower.Contains("failed") || lower.Contains("undefined reference") || lower.Contains("not found"))
@@ -511,6 +548,24 @@ public class GitHubFixerService : IGitHubFixerService
             return "low";
 
         return "medium";
+    }
+
+    private bool IsSecurityFindingError(string errorMessage)
+    {
+        return !string.IsNullOrWhiteSpace(errorMessage) && errorMessage.Contains("SECURITY_FINDING", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private bool IsValidJson(string json)
+    {
+        try
+        {
+            using var doc = JsonDocument.Parse(json);
+            return true;
+        }
+        catch
+        {
+            return false;
+        }
     }
 
     private async Task<string> ResolveWorkflowFilePathAsync(string repoPath, string workflowName)
