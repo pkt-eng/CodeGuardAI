@@ -37,6 +37,7 @@ public class GitHubController : ControllerBase
             try
             {
                 var githubFixerService = scope.ServiceProvider.GetRequiredService<IGitHubFixerService>();
+                var secretKey = request.GithubSecretKey ?? request.GithubPat;
                 await githubFixerService.ProcessActionFailureAsync(
                     request.Repo,
                     request.Branch,
@@ -45,7 +46,7 @@ public class GitHubController : ControllerBase
                     request.ErrorMessage,
                     request.PusherName,
                     request.PusherEmail,
-                    request.GithubSecretKey
+                    secretKey
                 );
             }
             catch (Exception ex)
@@ -70,4 +71,5 @@ public class ActionFailureRequest
     public string PusherEmail { get; set; } = string.Empty;
 
     public string? GithubSecretKey { get; set; }
+    public string? GithubPat { get; set; }
 }

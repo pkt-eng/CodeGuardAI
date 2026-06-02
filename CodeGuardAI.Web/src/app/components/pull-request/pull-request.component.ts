@@ -161,7 +161,7 @@ import confetti from 'canvas-confetti';
                 <button (click)="activeTab.set('files')" 
                         class="pb-3 text-sm font-bold transition-all relative border-b-2"
                         [ngClass]="activeTab() === 'files' ? 'text-cyber-cyan border-cyber-cyan font-bold' : 'text-slate-400 border-transparent hover:text-white'">
-                  📂 Files Changed (1)
+                  📂 Files Changed ({{ linkedVulns().length }})
                 </button>
               </div>
 
@@ -182,16 +182,20 @@ import confetti from 'canvas-confetti';
 
                     <div class="p-6 space-y-4">
                       <p class="text-sm text-slate-300 leading-relaxed">
-                        I have audited the code block in <span class="font-mono text-cyber-cyan">{{ linkedVuln()?.filePath }}</span> and applied a secure refactoring pattern.
+                        I have audited the code and applied secure refactoring patterns for the following file(s):
                       </p>
                       
-                      <div class="p-4 rounded-xl bg-[#080c14] border border-white/5 border-l-4 border-cyber-cyan">
-                        <h4 class="text-xs font-bold text-white uppercase tracking-wider mb-1">Audit Findings Summary</h4>
-                        <p class="text-xs text-slate-400">{{ linkedVuln()?.explanation }}</p>
-                      </div>
+                      @for (vuln of linkedVulns(); track vuln.id) {
+                        <div class="p-4 rounded-xl bg-[#080c14] border border-white/5 border-l-4 border-cyber-cyan mb-3">
+                          <h4 class="text-xs font-bold text-white uppercase tracking-wider mb-1">
+                            {{ vuln.filePath }} (Line {{ vuln.lineNumber }})
+                          </h4>
+                          <p class="text-xs text-slate-400">{{ vuln.explanation }}</p>
+                        </div>
+                      }
 
                       <p class="text-sm text-slate-300">
-                        This suggestion has been compiled, checked against active static analysis tools, and passed security assertions. Review the changes under the <strong>Files Changed</strong> tab and click below to approve and merge.
+                        These suggestions have been compiled, checked against active static analysis tools, and passed security assertions. Review the changes under the <strong>Files Changed</strong> tab and click below to approve and merge.
                       </p>
                     </div>
                   </div>
@@ -216,7 +220,7 @@ import confetti from 'canvas-confetti';
                             <h4 class="text-sm font-extrabold text-white flex items-center gap-1.5">
                               <span>🛡️</span> All checks passed successfully
                             </h4>
-                            <p class="text-xs text-slate-400 mt-1">1 secure audit assertion passed. Ready for immediate deployment.</p>
+                            <p class="text-xs text-slate-400 mt-1">{{ linkedVulns().length }} secure audit assertions passed. Ready for immediate deployment.</p>
                           </div>
                           <button (click)="triggerMerge()" class="px-6 py-3 bg-gradient-to-r from-cyber-green to-cyber-blue hover:shadow-lg hover:shadow-cyber-green/15 text-white font-extrabold rounded-xl transition-all shadow-glow-green text-sm hover:-translate-y-0.5">
                             Approve & Merge PR
@@ -230,7 +234,7 @@ import confetti from 'canvas-confetti';
                           <h4 class="text-sm font-extrabold text-cyber-purple flex items-center gap-1.5">
                             <span>✔️</span> Pull Request Merged
                           </h4>
-                          <p class="text-xs text-slate-400 mt-1">Simulated commit merged into main branch on {{ selectedPr()?.mergedAt | date:'medium' }}.</p>
+                          <p class="text-xs text-slate-400 mt-1">AI-generated fixes merged into main branch on {{ selectedPr()?.mergedAt | date:'medium' }}.</p>
                         </div>
                         <div class="px-4 py-2 bg-cyber-purple/10 border border-cyber-purple/30 text-cyber-purple rounded-xl font-bold text-xs font-mono">
                           +100 Points Awarded (John Doe)
@@ -245,30 +249,47 @@ import confetti from 'canvas-confetti';
 
               <!-- Files Changed Tab Content -->
               @if (activeTab() === 'files') {
-                <div class="glass-card border border-white/5 overflow-hidden flex flex-col animate-fadeIn">
-                  <div class="p-4 bg-[#090d16] border-b border-white/5 flex items-center justify-between">
-                    <span class="text-xs font-mono font-bold text-slate-400">{{ linkedVuln()?.filePath }}</span>
-                    <span class="text-[10px] font-mono px-2 py-0.5 rounded bg-cyber-green/15 text-cyber-green font-bold">1 file changed</span>
+                <div class="flex gap-4">
+                  <!-- File Selector Sidebar -->
+                  <div class="w-1/4 flex flex-col gap-2">
+                    <span class="text-xs font-bold text-slate-400 px-2 uppercase tracking-wider">Affected Files</span>
+                    @for (vuln of linkedVulns(); track vuln.id; let idx = $index) {
+                      <button (click)="selectedFileIdx.set(idx)"
+                              class="w-full text-left px-4 py-3 rounded-xl border text-xs font-mono font-bold transition-all truncate"
+                              [ngClass]="selectedFileIdx() === idx ? 'bg-cyber-cyan/10 border-cyber-cyan/50 text-cyber-cyan shadow-glow-cyan' : 'bg-white/5 border-white/5 text-slate-400 hover:text-white hover:bg-white/10'">
+                        {{ vuln.filePath.split('/').pop() }}
+                      </button>
+                    }
                   </div>
 
-                  <div class="grid grid-cols-1 md:grid-cols-2 divide-y md:divide-y-0 md:divide-x divide-white/5 font-mono text-xs">
-                    
-                    <!-- Original -->
-                    <div class="flex flex-col bg-cyber-red/2.5">
-                      <div class="p-3 bg-cyber-red/5 border-b border-white/5 font-semibold text-cyber-red text-center uppercase tracking-wider text-[10px]">
-                        Original Line Blocks
+                  <!-- File Diff View -->
+                  <div class="w-3/4 glass-card border border-white/5 overflow-hidden flex flex-col animate-fadeIn">
+                    @if (linkedVulns()[selectedFileIdx()]; as activeVuln) {
+                      <div class="p-4 bg-[#090d16] border-b border-white/5 flex items-center justify-between">
+                        <span class="text-xs font-mono font-bold text-slate-300">{{ activeVuln.filePath }}</span>
+                        <span class="text-[10px] font-mono px-2 py-0.5 rounded bg-cyber-green/15 text-cyber-green font-bold">Line {{ activeVuln.lineNumber }}</span>
                       </div>
-                      <pre class="p-6 overflow-x-auto text-slate-300 whitespace-pre leading-relaxed min-h-[220px] bg-[#070a10]">{{ linkedVuln()?.vulnerableCode }}</pre>
-                    </div>
 
-                    <!-- Secure -->
-                    <div class="flex flex-col bg-cyber-green/2.5">
-                      <div class="p-3 bg-cyber-green/5 border-b border-white/5 font-semibold text-cyber-green text-center uppercase tracking-wider text-[10px]">
-                        Secure Remediated Blocks
+                      <div class="grid grid-cols-1 xl:grid-cols-2 divide-y xl:divide-y-0 xl:divide-x divide-white/5 font-mono text-xs">
+                        
+                        <!-- Original -->
+                        <div class="flex flex-col bg-cyber-red/2.5">
+                          <div class="p-3 bg-cyber-red/5 border-b border-white/5 font-semibold text-cyber-red text-center uppercase tracking-wider text-[10px]">
+                            Original Line Blocks
+                          </div>
+                          <pre class="p-6 overflow-x-auto text-slate-300 whitespace-pre leading-relaxed min-h-[300px] bg-[#070a10]">{{ activeVuln.vulnerableCode }}</pre>
+                        </div>
+
+                        <!-- Secure -->
+                        <div class="flex flex-col bg-cyber-green/2.5">
+                          <div class="p-3 bg-cyber-green/5 border-b border-white/5 font-semibold text-cyber-green text-center uppercase tracking-wider text-[10px]">
+                            Secure Remediated Blocks
+                          </div>
+                          <pre class="p-6 overflow-x-auto text-slate-200 whitespace-pre leading-relaxed min-h-[300px] bg-[#070a10]">{{ activeVuln.secureCode }}</pre>
+                        </div>
+
                       </div>
-                      <pre class="p-6 overflow-x-auto text-slate-200 whitespace-pre leading-relaxed min-h-[220px] bg-[#070a10]">{{ linkedVuln()?.secureCode }}</pre>
-                    </div>
-
+                    }
                   </div>
                 </div>
               }
@@ -284,7 +305,8 @@ import confetti from 'canvas-confetti';
 export class PullRequestComponent implements OnInit {
   prs = signal<PullRequest[]>([]);
   selectedPr = signal<PullRequest | null>(null);
-  linkedVuln = signal<Vulnerability | null>(null);
+  linkedVulns = signal<Vulnerability[]>([]);
+  selectedFileIdx = signal<number>(0);
   activeTab = signal<'conversation' | 'files'>('conversation');
 
   mergeLoading = signal(false);
@@ -311,7 +333,8 @@ export class PullRequestComponent implements OnInit {
     this.apiService.getPullRequestDetails(id).subscribe({
       next: (res) => {
         this.selectedPr.set(res.pullRequest);
-        this.linkedVuln.set(res.vulnerability);
+        this.linkedVulns.set(res.vulnerabilities || []);
+        this.selectedFileIdx.set(0);
         this.activeTab.set('conversation');
       }
     });
@@ -319,7 +342,8 @@ export class PullRequestComponent implements OnInit {
 
   deselectPr(): void {
     this.selectedPr.set(null);
-    this.linkedVuln.set(null);
+    this.linkedVulns.set([]);
+    this.selectedFileIdx.set(0);
     this.fetchPullRequests();
   }
 

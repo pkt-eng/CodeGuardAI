@@ -38,13 +38,13 @@ public class PullRequestController : ControllerBase
             return NotFound(new { Message = "Pull Request not found." });
         }
 
-        // Fetch associated vulnerability to show before/after diffs
-        var vulnerability = await _context.Vulnerabilities.SingleOrDefaultAsync(v => v.PullRequestId == id);
+        // Fetch associated vulnerabilities to show before/after diffs
+        var vulnerabilities = await _context.Vulnerabilities.Where(v => v.PullRequestId == id).ToListAsync();
 
         return Ok(new
         {
             PullRequest = pr,
-            Vulnerability = vulnerability
+            Vulnerabilities = vulnerabilities
         });
     }
 
@@ -66,7 +66,8 @@ public class PullRequestController : ControllerBase
             // Perform the merge and push to the repository
             await _gitHubFixerService.MergePullRequestAsync(id);
 
-            var vulnerability = await _context.Vulnerabilities.SingleOrDefaultAsync(v => v.PullRequestId == id);
+            var vulnerabilities = await _context.Vulnerabilities.Where(v => v.PullRequestId == id).ToListAsync();
+            var vulnerability = vulnerabilities.FirstOrDefault();
 
             // Reward points for merged PR
             var developerName = !string.IsNullOrWhiteSpace(pr.AuthorName)
@@ -102,7 +103,7 @@ public class PullRequestController : ControllerBase
             {
                 Message = "Pull Request successfully merged! Vulnerability remediated and secure code applied.",
                 PullRequest = pr,
-                Vulnerability = vulnerability
+                Vulnerabilities = vulnerabilities
             });
         }
         catch (Exception ex)

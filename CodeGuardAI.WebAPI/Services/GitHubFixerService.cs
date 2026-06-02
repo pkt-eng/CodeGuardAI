@@ -78,6 +78,154 @@ public class GitHubFixerService : IGitHubFixerService
         await _dbContext.SaveChangesAsync();
         _logger.LogInformation("Saved initial build failure record to database (Id: {Id}).", vulnerability.Id);
 
+        // ── Check if there are multiple security findings ──
+        var securityFindings = ParseMultipleSecurityFindings(errorMessage);
+        if (securityFindings.Count > 1)
+        {
+            _logger.LogInformation("Detected {Count} security findings. Starting multi-file secure fix flow.", securityFindings.Count);
+            
+            var vulnerabilities = new List<Vulnerability>();
+            var clonePath = Path.Combine(_cloneBaseDirectory, repoName);
+            if (!Directory.Exists(_cloneBaseDirectory))
+            {
+                Directory.CreateDirectory(_cloneBaseDirectory);
+            }
+            if (!Directory.Exists(clonePath))
+            {
+                _logger.LogInformation("Cloning repository to {Path}", clonePath);
+                var cloneUrl = string.IsNullOrEmpty(githubSecretKey)
+                    ? $"https://github.com/{repo}.git"
+                    : $"https://{githubSecretKey}@github.com/{repo}.git";
+                await RunGitCommandAsync($"clone {cloneUrl} \"{clonePath}\"", _cloneBaseDirectory, githubSecretKey);
+            }
+            else
+            {
+                _logger.LogInformation("Repository directory exists. Updating local files.");
+                await RunGitCommandAsync("reset --hard", clonePath);
+                await RunGitCommandAsync("clean -fd", clonePath);
+                await RunGitCommandAsync("fetch origin", clonePath);
+            }
+
+            try
+            {
+                await RunGitCommandAsync($"checkout {branch}", clonePath);
+                await RunGitCommandAsync($"pull origin {branch}", clonePath);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning("Checkout or pull failed: {Message}. Attempting to checkout branch directly.", ex.Message);
+                await RunGitCommandAsync($"checkout -B {branch} origin/{branch}", clonePath);
+            }
+
+            bool anyFixApplied = false;
+            for (int i = 0; i < securityFindings.Count; i++)
+            {
+                var finding = securityFindings[i];
+                var fullFilePath = Path.Combine(clonePath, finding.FilePath);
+                if (!File.Exists(fullFilePath)) continue;
+
+                var originalContent = await File.ReadAllTextAsync(fullFilePath);
+                
+                _logger.LogInformation("Generating Secure Fix via Azure OpenAI for file: {FilePath}", finding.FilePath);
+                var fixResult = await _openAiService.GenerateSecureFixAsync($"GitHub Actions Build Failure: {repoName} - {finding.FindingType}", finding.FilePath, originalContent);
+
+                if (string.IsNullOrWhiteSpace(fixResult.SecureCode) || fixResult.SecureCode == originalContent)
+                {
+                    _logger.LogWarning("No changes generated for {FilePath}", finding.FilePath);
+                    continue;
+                }
+
+                await File.WriteAllTextAsync(fullFilePath, fixResult.SecureCode);
+                anyFixApplied = true;
+
+                Vulnerability vuln;
+                if (i == 0)
+                {
+                    vuln = vulnerability;
+                    vuln.FilePath = finding.FilePath;
+                    vuln.LineNumber = finding.LineNumber;
+                    vuln.Title = $"Secure Fix: {finding.FindingType}";
+                    vuln.VulnerableCode = originalContent.Length > 4000 ? originalContent[..4000] : originalContent;
+                    vuln.SecureCode = fixResult.SecureCode.Length > 4000 ? fixResult.SecureCode[..4000] : fixResult.SecureCode;
+                    vuln.Explanation = fixResult.Explanation;
+                }
+                else
+                {
+                    vuln = new Vulnerability
+                    {
+                        SnykId = $"github-{runId}-{i}",
+                        Title = $"Secure Fix: {finding.FindingType}",
+                        Severity = "critical",
+                        FilePath = finding.FilePath,
+                        LineNumber = finding.LineNumber,
+                        VulnerableCode = originalContent.Length > 4000 ? originalContent[..4000] : originalContent,
+                        SecureCode = fixResult.SecureCode.Length > 4000 ? fixResult.SecureCode[..4000] : fixResult.SecureCode,
+                        Explanation = fixResult.Explanation,
+                        Status = "Open",
+                        Repo = repo,
+                        CommitSha = commitSha,
+                        RunId = runId,
+                        PusherName = pusherName ?? string.Empty,
+                        PusherEmail = pusherEmail ?? string.Empty,
+                        Branch = branch ?? string.Empty,
+                        GithubSecretKey = githubSecretKey,
+                        Classification = "high",
+                        CreatedAt = DateTime.UtcNow
+                    };
+                    _dbContext.Vulnerabilities.Add(vuln);
+                }
+                vulnerabilities.Add(vuln);
+            }
+
+            if (!anyFixApplied)
+            {
+                _logger.LogWarning("No code fixes could be applied for any of the findings.");
+                vulnerability.Explanation = $"Build failure on branch '{branch}'. AI failed to generate code fixes for any of the {securityFindings.Count} detected files.";
+                vulnerability.Status = "Open";
+                await _dbContext.SaveChangesAsync();
+                return;
+            }
+
+            var fixBranch = $"codeguardai-fix/{runId}";
+            await RunGitCommandAsync("config user.name \"CodeGuardAI\"", clonePath);
+            await RunGitCommandAsync("config user.email \"codeguardai@users.noreply.github.com\"", clonePath);
+            await RunGitCommandAsync($"checkout -b {fixBranch}", clonePath);
+
+            foreach (var vuln in vulnerabilities)
+            {
+                await RunGitCommandAsync($"add \"{vuln.FilePath}\"", clonePath);
+            }
+
+            var commitMsg = $"Auto-fix: Resolved {vulnerabilities.Count} security findings on GitHub Action (Run ID: {runId})";
+            await RunGitCommandAsync($"commit -m \"{commitMsg}\"", clonePath);
+
+            _logger.LogInformation("Skipping auto-push of multi-fix branch {FixBranch} to origin. Changes remain local.", fixBranch);
+
+            var pr = new PullRequest
+            {
+                Title = commitMsg,
+                SourceBranch = fixBranch,
+                TargetBranch = branch ?? string.Empty,
+                Status = "Open",
+                CreatedAt = DateTime.UtcNow,
+                Repo = repo,
+                AuthorName = pusherName ?? string.Empty,
+                AuthorEmail = pusherEmail ?? string.Empty
+            };
+            _dbContext.PullRequests.Add(pr);
+            await _dbContext.SaveChangesAsync();
+
+            foreach (var vuln in vulnerabilities)
+            {
+                vuln.PullRequestId = pr.Id;
+                vuln.Status = "PRCreated";
+            }
+            await _dbContext.SaveChangesAsync();
+            
+            _logger.LogInformation("Saved proposed multi-fix and created single PR record (PR Id: {PrId}) in database linking {Count} vulnerabilities.", pr.Id, vulnerabilities.Count);
+            return;
+        }
+
         // ── Step 2: Attempt automated fix ──
         try
         {
@@ -225,9 +373,7 @@ public class GitHubFixerService : IGitHubFixerService
 
             await RunGitCommandAsync($"commit -m \"{commitMsg}\"", clonePath);
 
-            _logger.LogInformation("Pushing fix branch {FixBranch} to origin", fixBranch);
-            await RunGitCommandAsync($"push origin {fixBranch}", clonePath, vulnerability.GithubSecretKey);
-            _logger.LogInformation("Successfully pushed fix branch to GitHub!");
+            _logger.LogInformation("Skipping auto-push of fix branch {FixBranch} to origin. Changes remain local.", fixBranch);
 
             // Create a PullRequest record so the UI can show the change and provide an Accept button
             var pr = new PullRequest
@@ -270,10 +416,12 @@ public class GitHubFixerService : IGitHubFixerService
         var pr = await _dbContext.PullRequests.FindAsync(pullRequestId);
         if (pr == null) throw new InvalidOperationException("Pull request not found.");
 
-        // Get the associated vulnerability to retrieve the GitHub secret
-        var associatedVuln = await _dbContext.Vulnerabilities.FirstOrDefaultAsync(v => v.PullRequestId == pr.Id);
-        if (associatedVuln == null)
-            throw new InvalidOperationException($"No associated vulnerability found for Pull Request {pullRequestId}.");
+        // Get all associated vulnerabilities
+        var vulnerabilities = await _dbContext.Vulnerabilities.Where(v => v.PullRequestId == pr.Id).ToListAsync();
+        if (!vulnerabilities.Any())
+            throw new InvalidOperationException($"No associated vulnerabilities found for Pull Request {pullRequestId}.");
+
+        var associatedVuln = vulnerabilities.First();
 
         if (string.IsNullOrWhiteSpace(pr.Repo))
         {
@@ -323,34 +471,15 @@ public class GitHubFixerService : IGitHubFixerService
         await RunGitCommandAsync($"checkout {pr.TargetBranch}", clonePath);
         await RunGitCommandAsync($"pull origin {pr.TargetBranch}", clonePath);
 
-        // ── Step 3: Ensure the fix branch exists on remote ──
-        bool sourceBranchExistsOnRemote = false;
-        try
+        // ── Step 3: Apply all secure code fixes directly ──
+        foreach (var vuln in vulnerabilities)
         {
-            var lsOutput = await RunGitCommandAsync($"ls-remote --heads origin {pr.SourceBranch}", clonePath);
-            sourceBranchExistsOnRemote = !string.IsNullOrWhiteSpace(lsOutput);
-        }
-        catch
-        {
-            sourceBranchExistsOnRemote = false;
-        }
-
-        if (!sourceBranchExistsOnRemote)
-        {
-            _logger.LogWarning("Fix branch '{Branch}' does not exist on remote. Creating it now with the secure code from the database.", pr.SourceBranch);
-
-            // Get the vulnerability and its secure code
-            var vuln = await _dbContext.Vulnerabilities.FirstOrDefaultAsync(v => v.PullRequestId == pr.Id);
-            if (vuln == null || string.IsNullOrWhiteSpace(vuln.SecureCode))
+            if (string.IsNullOrWhiteSpace(vuln.SecureCode))
             {
-                throw new InvalidOperationException($"Cannot create fix branch: no secure code found for PR {pr.Id}.");
+                _logger.LogWarning("Vulnerability {Id} has no secure code to apply.", vuln.Id);
+                continue;
             }
 
-            // Create the fix branch from the target branch
-            try { await RunGitCommandAsync($"branch -D {pr.SourceBranch}", clonePath); } catch { /* ignore if doesn't exist locally */ }
-            await RunGitCommandAsync($"checkout -b {pr.SourceBranch}", clonePath);
-
-            // Determine the file path to apply the fix to
             var filePath = vuln.FilePath;
             if (filePath.StartsWith("workflow:", StringComparison.OrdinalIgnoreCase))
             {
@@ -368,66 +497,27 @@ public class GitHubFixerService : IGitHubFixerService
                 Directory.CreateDirectory(fileDir);
             }
 
-            // Write the secure code fix
             await File.WriteAllTextAsync(fullFilePath, vuln.SecureCode);
             _logger.LogInformation("Applied secure code fix to {FilePath}", fullFilePath);
 
-            // Check if there are actual changes before committing
-            try
-            {
-                await RunGitCommandAsync($"add \"{filePath}\"", clonePath);
-                var commitMsg = $"CodeGuardAI auto-fix: {vuln.Title}";
-                await RunGitCommandAsync($"commit -m \"{commitMsg}\"", clonePath);
-                await RunGitCommandAsync($"push origin {pr.SourceBranch}", clonePath, associatedVuln.GithubSecretKey);
-                _logger.LogInformation("Successfully pushed fix branch '{Branch}' to remote.", pr.SourceBranch);
-            }
-            catch (Exception ex)
-            {
-                if (ex.Message.Contains("nothing to commit") || ex.Message.Contains("working tree clean"))
-                {
-                    _logger.LogInformation("No changes to commit for {Branch} - working tree is clean.", pr.SourceBranch);
-                    // Proceed to merge - the branch may already have the fixes
-                }
-                else
-                {
-                    throw; // Re-throw if it's a different error
-                }
-            }
-
-            // Switch back to target branch for the merge
-            await RunGitCommandAsync($"checkout {pr.TargetBranch}", clonePath);
-            await RunGitCommandAsync("fetch origin", clonePath);
+            await RunGitCommandAsync($"add \"{filePath}\"", clonePath);
         }
 
-        // ── Step 4: Merge the source branch into target ──
+        // ── Step 4: Commit and Push to target branch ──
         try
         {
-            await RunGitCommandAsync($"merge --no-ff origin/{pr.SourceBranch} -m \"Merge PR {pr.Id} - {pr.Title}\"", clonePath, associatedVuln.GithubSecretKey);
-        }
-        catch (Exception ex)
-        {
-            // Handle cases where merge is already up-to-date or no changes to merge
-            if (ex.Message.Contains("Already up to date") || ex.Message.Contains("already up-to-date") ||
-                ex.Message.Contains("fast-forward") || ex.Message.Contains("nothing to merge"))
-            {
-                _logger.LogInformation("Branch {SourceBranch} is already up-to-date with {TargetBranch}. Skipping merge.", pr.SourceBranch, pr.TargetBranch);
-            }
-            else
-            {
-                throw; // Re-throw if it's a different error
-            }
-        }
-
-        // ── Step 5: Push merged target branch ──
-        try
-        {
+            var commitMsg = $"Merge PR {pr.Id} - {pr.Title}";
+            await RunGitCommandAsync($"commit -m \"{commitMsg}\"", clonePath);
+            
+            _logger.LogInformation("Pushing merged target branch {TargetBranch} directly to origin", pr.TargetBranch);
             await RunGitCommandAsync($"push origin {pr.TargetBranch}", clonePath, associatedVuln.GithubSecretKey);
+            _logger.LogInformation("Successfully pushed merged target branch to GitHub!");
         }
         catch (Exception ex)
         {
-            if (ex.Message.Contains("already up-to-date") || ex.Message.Contains("Everything up-to-date"))
+            if (ex.Message.Contains("nothing to commit") || ex.Message.Contains("working tree clean"))
             {
-                _logger.LogInformation("Target branch {TargetBranch} already up-to-date at remote.", pr.TargetBranch);
+                _logger.LogInformation("No changes to commit for {Branch} - working tree is clean.", pr.TargetBranch);
             }
             else
             {
@@ -435,18 +525,17 @@ public class GitHubFixerService : IGitHubFixerService
             }
         }
 
-        // ── Step 6: Update DB state ──
+        // ── Step 5: Update DB state ──
         pr.Status = "Merged";
         pr.MergedAt = DateTime.UtcNow;
 
-        var mergedVuln = await _dbContext.Vulnerabilities.SingleOrDefaultAsync(v => v.PullRequestId == pr.Id);
-        if (mergedVuln != null)
+        foreach (var vuln in vulnerabilities)
         {
-            mergedVuln.Status = "Fixed";
+            vuln.Status = "Fixed";
         }
 
         await _dbContext.SaveChangesAsync();
-        _logger.LogInformation("PR {PrId} merged successfully. Vulnerability marked as Fixed.", pr.Id);
+        _logger.LogInformation("PR {PrId} merged successfully. All {Count} associated vulnerabilities marked as Fixed.", pr.Id, vulnerabilities.Count);
     }
 
     private async Task<(string FilePath, int LineNumber)> ParseErrorLogsAsync(string errorMessage)
@@ -746,5 +835,29 @@ public class GitHubFixerService : IGitHubFixerService
         }
 
         return output;
+    }
+
+    private List<(string FilePath, int LineNumber, string FindingType)> ParseMultipleSecurityFindings(string errorMessage)
+    {
+        var findings = new List<(string FilePath, int LineNumber, string FindingType)>();
+        var securityFindingPattern = new Regex(@"(\./?[\w\-\.\/]+\.(html|ts|js|jsx|tsx|cs)):?(\d+)?", RegexOptions.IgnoreCase);
+        
+        var lines = errorMessage.Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries);
+        foreach (var line in lines)
+        {
+            if (line.Contains("SECURITY_FINDING", StringComparison.OrdinalIgnoreCase))
+            {
+                var match = securityFindingPattern.Match(line);
+                if (match.Success)
+                {
+                    var filePath = match.Groups[1].Value.Replace("./", string.Empty);
+                    int.TryParse(match.Groups[3].Value, out var lineNum);
+                    var findingText = line.Substring(line.IndexOf("SECURITY_FINDING", StringComparison.OrdinalIgnoreCase));
+                    findings.Add((filePath, lineNum == 0 ? 1 : lineNum, findingText));
+                }
+            }
+        }
+        
+        return findings.GroupBy(f => f.FilePath).Select(g => g.First()).ToList();
     }
 }

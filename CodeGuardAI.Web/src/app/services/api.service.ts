@@ -135,8 +135,8 @@ export class ApiService {
     return this.http.get<PullRequest[]>(`${this.baseUrl}/pullrequest`, { headers: this.getHeaders() });
   }
 
-  getPullRequestDetails(id: number): Observable<{ pullRequest: PullRequest; vulnerability: Vulnerability }> {
-    return this.http.get<{ pullRequest: PullRequest; vulnerability: Vulnerability }>(`${this.baseUrl}/pullrequest/${id}`, { headers: this.getHeaders() });
+  getPullRequestDetails(id: number): Observable<{ pullRequest: PullRequest; vulnerabilities: Vulnerability[] }> {
+    return this.http.get<{ pullRequest: PullRequest; vulnerabilities: Vulnerability[] }>(`${this.baseUrl}/pullrequest/${id}`, { headers: this.getHeaders() });
   }
 
   mergePullRequest(id: number): Observable<any> {
